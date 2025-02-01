@@ -86,3 +86,43 @@ Clarinet.test({
     loanDetails.result.expectSome();
   },
 });
+
+Clarinet.test({
+  name: "Can liquidate undercollateralized loans",
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const borrower = accounts.get('wallet_1')!;
+    const liquidator = accounts.get('wallet_2')!;
+    const loanAmount = 100000000; // 100 STX
+    
+    // Setup loan
+    let block = chain.mineBlock([
+      Tx.contractCall('verse_bank', 'create-account', [], borrower.address),
+      Tx.contractCall('verse_bank', 'take-loan', [types.uint(loanAmount)], borrower.address)
+    ]);
+    
+    block.receipts[1].result.expectOk();
+    
+    // Check liquidation status
+    let canLiquidate = chain.callReadOnlyFn(
+      'verse_bank',
+      'check-liquidation',
+      [types.principal(borrower.address)],
+      liquidator.address
+    );
+    
+    // Attempt liquidation
+    block = chain.mineBlock([
+      Tx.contractCall('verse_bank', 'liquidate', [types.principal(borrower.address)], liquidator.address)
+    ]);
+    
+    // Verify loan is cleared after liquidation
+    let loanDetails = chain.callReadOnlyFn(
+      'verse_bank',
+      'get-loan-details',
+      [types.principal(borrower.address)],
+      borrower.address
+    );
+    
+    loanDetails.result.expectNone();
+  },
+});
