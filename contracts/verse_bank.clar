@@ -7,11 +7,15 @@
 (define-constant err-no-account (err u102))
 (define-constant err-loan-exists (err u103))
 (define-constant err-insufficient-collateral (err u104))
+(define-constant err-no-loan (err u105))
+(define-constant err-not-liquidatable (err u106))
 
 ;; Data Variables
 (define-data-var minimum-deposit uint u10000000) ;; 10 STX
 (define-data-var interest-rate uint u5) ;; 5% APR
 (define-data-var loan-collateral-ratio uint u150) ;; 150% collateral required
+(define-data-var liquidation-threshold uint u120) ;; 120% - loan becomes liquidatable
+(define-data-var liquidation-penalty uint u10) ;; 10% penalty on liquidation
 
 ;; Data Maps
 (define-map accounts principal
@@ -26,7 +30,8 @@
   {
     amount: uint,
     collateral: uint,
-    start-block: uint
+    start-block: uint,
+    last-check: uint
   }
 )
 
@@ -40,10 +45,14 @@
     )
 )
 
+(define-private (get-current-collateral-ratio (loan-amount uint) (collateral uint))
+    (/ (* collateral u100) loan-amount)
+)
+
 ;; Public Functions
 (define-public (create-account)
     (let
-        ((account-exists (default-to false (get has-loan (map-get? accounts tx-sender)))))
+        ((account-exists (default-to false (get has-loan (map-get? accounts tx-sender))))
         (ok (map-set accounts tx-sender
             {
                 balance: u0,
@@ -114,12 +123,36 @@
                     {
                         amount: amount,
                         collateral: required-collateral,
-                        start-block: block-height
+                        start-block: block-height,
+                        last-check: block-height
                     }
                 )
                 (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
                 (ok true)
             )
+        )
+    )
+)
+
+(define-public (liquidate (borrower principal))
+    (let
+        (
+            (loan (unwrap! (map-get? loans borrower) err-no-loan))
+            (current-ratio (get-current-collateral-ratio (get amount loan) (get collateral loan)))
+            (penalty (/ (* (get amount loan) (var-get liquidation-penalty)) u100))
+            (liquidation-amount (+ (get amount loan) penalty))
+        )
+        (if (< current-ratio (var-get liquidation-threshold))
+            (begin
+                ;; Transfer loan amount + penalty to contract
+                (try! (stx-transfer? liquidation-amount tx-sender (as-contract tx-sender)))
+                ;; Transfer collateral to liquidator
+                (try! (as-contract (stx-transfer? (get collateral loan) (as-contract tx-sender) tx-sender)))
+                ;; Clear loan
+                (map-delete loans borrower)
+                (ok true)
+            )
+            err-not-liquidatable
         )
     )
 )
@@ -135,4 +168,14 @@
 
 (define-read-only (get-account-info (account principal))
     (ok (map-get? accounts account))
+)
+
+(define-read-only (check-liquidation (account principal))
+    (let
+        (
+            (loan (unwrap! (map-get? loans account) err-no-loan))
+            (current-ratio (get-current-collateral-ratio (get amount loan) (get collateral loan)))
+        )
+        (ok (< current-ratio (var-get liquidation-threshold)))
+    )
 )
